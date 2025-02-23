@@ -147,7 +147,9 @@ DevicePanel::DevicePanel(SettingsWindow *parent) : ListWidget(parent) {
 
   QObject::connect(parent, &SettingsWindow::offroadTransition, [=](bool offroad) {
     for (auto btn : findChildren<ButtonControl *>()) {
-      btn->setEnabled(offroad);
+      if (btn != resetCalibBtn) {
+        btn->setEnabled(offroad);
+      }
     }
   });
 
