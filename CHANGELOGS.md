@@ -1,3 +1,7 @@
+AnimalPilot - Version 0.8.12-4 (2025-02-23)
+========================
+* NEW❗: Reset Calibration button disponible in OnRoad state
+
 AnimalPilot - Version 0.8.12-4 (2023-10-20)
 ========================
 * NEW❗: Autohold for car's without electronic parking brake
