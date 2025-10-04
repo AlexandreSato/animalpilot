@@ -27,6 +27,7 @@ public:
   std::string hw_serial;
   std::atomic<bool> connected = true;
   std::atomic<bool> comms_healthy = true;
+  std::atomic<bool> flexray = false;
   static std::vector<std::string> list();
 
   // HW communication

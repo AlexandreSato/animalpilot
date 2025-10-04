@@ -25,6 +25,9 @@
 
 #define PANDA_BUS_OFFSET 4
 
+#define PICO_FLEXRAY_DONGLE_ID_PREFIX "picoflex"
+#define MAX_FRAME_PAYLOAD_BYTES 254
+
 struct __attribute__((packed)) can_header {
   uint8_t reserved : 1;
   uint8_t bus : 3;
@@ -42,6 +45,18 @@ struct can_frame {
   long src;
 };
 
+struct flexray_frame_t {
+  uint32_t payload_crc; // 24 bits
+
+  uint16_t frame_id;                  // 11 bits
+  uint16_t header_crc;                // 11 bits
+
+  uint8_t indicators;                 // 5 bit
+  uint8_t payload_length_words;       // 7 bits (number of 16-bit words)
+  uint8_t cycle_count;                // 6 bits
+  uint8_t source; // from ecu or vehicle
+  char payload[MAX_FRAME_PAYLOAD_BYTES];
+} ;
 
 class Panda {
 private:
@@ -56,7 +71,7 @@ public:
   bool connected();
   bool comms_healthy();
   std::string hw_serial();
-
+  bool is_flexray();
   // Static functions
   static std::vector<std::string> list(bool usb_only=false);
 
@@ -95,5 +110,8 @@ protected:
   void pack_can_buffer(const capnp::List<cereal::CanData>::Reader &can_data_list,
                          std::function<void(uint8_t *, size_t)> write_func);
   bool unpack_can_buffer(uint8_t *data, uint32_t &size, std::vector<can_frame> &out_vec);
+  void pack_flexray_buffer(const capnp::List<cereal::CanData>::Reader &can_data_list,
+                         std::function<void(uint8_t *, size_t)> write_func);
+  bool unpack_flexray_buffer(uint8_t *data, uint32_t &size, std::vector<can_frame> &out_vec);
   uint8_t calculate_checksum(uint8_t *data, uint32_t len);
 };

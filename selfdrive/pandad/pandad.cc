@@ -80,6 +80,11 @@ Panda *connect(std::string serial="", uint32_t index=0) {
   }
   //panda->enable_deepsleep();
 
+  if (util::starts_with(panda->hw_serial(), PICO_FLEXRAY_DONGLE_ID_PREFIX)) {
+    LOGW("panda %s is pico-flexray, skipping firmware check...", panda->hw_serial().c_str());
+    return panda.release();
+  }
+
   for (int i = 0; i < PANDA_BUS_CNT; i++) {
     panda->set_can_fd_auto(i, true);
   }
@@ -119,7 +124,14 @@ void can_send_thread(std::vector<Panda *> pandas, bool fake_send) {
 
     // Don't send if older than 1 second
     if ((nanos_since_boot() - event.getLogMonoTime() < 1e9) && !fake_send) {
+      bool any_flexray = std::any_of(pandas.begin(), pandas.end(), [](Panda *p) { return p->is_flexray(); });
+      if (any_flexray) {
+        LOGT("FlexRay panda detected; skipping normal CAN send to non-FlexRay pandas");
+      }
       for (const auto& panda : pandas) {
+        if (any_flexray && !panda->is_flexray()) {
+          continue;
+        }
         LOGT("sending sendcan to panda: %s", (panda->hw_serial()).c_str());
         panda->can_send(event.getSendcan());
         LOGT("sendcan sent to panda: %s", (panda->hw_serial()).c_str());

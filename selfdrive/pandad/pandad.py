@@ -12,6 +12,7 @@ from openpilot.common.params import Params
 from openpilot.system.hardware import HARDWARE
 from openpilot.common.swaglog import cloudlog
 
+PICO_FLEXRAY_DONGLE_ID_PREFIX = "picoflex"
 
 def get_expected_signature(panda: Panda) -> bytes:
   try:
@@ -22,6 +23,11 @@ def get_expected_signature(panda: Panda) -> bytes:
     return b""
 
 def flash_panda(panda_serial: str) -> Panda:
+  if panda_serial.startswith(PICO_FLEXRAY_DONGLE_ID_PREFIX):
+    # Picoflex is not supported by pandad
+    cloudlog.warning(f"Panda {panda_serial} is pico-flexray dongle, skipping flash...")
+    return Panda(panda_serial)
+
   try:
     panda = Panda(panda_serial)
   except PandaProtocolMismatch:
@@ -148,6 +154,10 @@ def main() -> None:
       params.put("PandaSignatures", b','.join(p.get_signature() for p in pandas))
 
       for panda in pandas:
+        if panda.get_usb_serial().startswith(PICO_FLEXRAY_DONGLE_ID_PREFIX):
+          cloudlog.warning(f"Panda {panda.get_usb_serial()} is pico-flexray, skipping...")
+          continue
+
         # skip health check if the detected panda is not supported
         supported_panda = check_panda_support(panda)
         if not supported_panda:
