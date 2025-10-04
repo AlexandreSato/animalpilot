@@ -52,6 +52,10 @@ std::string Panda::hw_serial() {
   return hw_serial_str;
 }
 
+bool Panda::is_flexray() {
+  return util::starts_with(hw_serial_str, PICO_FLEXRAY_DONGLE_ID_PREFIX);
+}
+
 std::vector<std::string> Panda::list(bool usb_only) {
   static std::unique_ptr<libusb_context, decltype(&libusb_exit)> context(init_usb_ctx(), libusb_exit);
 
@@ -133,7 +137,11 @@ bool Panda::can_receive(std::vector<can_frame>& out_vec) {
   bool ret = true;
   if (recv > 0) {
     receive_buffer_size += recv;
-    ret = unpack_can_buffer(receive_buffer, receive_buffer_size, out_vec);
+    if (is_flexray()) {
+      ret = unpack_flexray_buffer(receive_buffer, receive_buffer_size, out_vec);
+    } else {
+      ret = unpack_can_buffer(receive_buffer, receive_buffer_size, out_vec);
+    }
   }
   return ret;
 }
@@ -343,4 +351,148 @@ int Panda::bulk_read(unsigned char endpoint, unsigned char* data, int length, un
   } while (err != 0 && connected_flag);
 
   return transferred;
+}
+
+static uint32_t calculate_flexray_header_crc(const flexray_frame_t &frame) {
+  uint32_t data_word = 0;
+  data_word |= (uint32_t)frame.payload_length_words;
+  data_word |= (uint32_t)frame.frame_id << 7;
+  data_word |= (uint32_t)frame.indicators << (7+11+0);
+
+  uint32_t crc = 0x1A;
+  const uint32_t poly = 0x385;
+
+  for (int i = 19; i >= 0; --i) {
+    bool data_bit = (data_word >> i) & 1;
+    bool crc_msb = (crc >> 10) & 1;
+
+    crc <<= 1;
+    if (data_bit ^ crc_msb) {
+      crc ^= poly;
+    }
+  }
+
+  return crc & 0x7FF;
+}
+
+static uint32_t calculate_flexray_payload_crc(const flexray_frame_t &frame) {
+  uint32_t payload_bits = frame.payload_length_words * 16;
+  uint32_t total_bits_to_crc = 40 + payload_bits;
+
+  uint32_t crc = 0xFEDCBA;
+  const uint32_t poly = 0x5D6DCB;
+
+  auto get_bit = [&](int bit_pos) {
+    int byte_pos = bit_pos / 8;
+    int bit_in_byte = 7 - (bit_pos % 8);
+
+    if (byte_pos < 5) {
+      uint8_t header_buf[5];
+      header_buf[0] =
+        (frame.indicators << 3) |
+        ((frame.frame_id >> 8) & 0b111);
+      header_buf[1] = frame.frame_id & 0xFF;
+      header_buf[2] = ((frame.payload_length_words << 1) | ((frame.header_crc >> 10) & 0b1));
+      header_buf[3] = (frame.header_crc >> 2) & 0xFF;
+      header_buf[4] = ((frame.header_crc & 0b11) << 6) | (frame.cycle_count & 0b111111);
+      return (header_buf[byte_pos] >> bit_in_byte) & 1;
+    } else {
+      return (frame.payload[byte_pos - 5] >> bit_in_byte) & 1;
+    }
+  };
+
+  for (uint32_t i = 0; i < total_bits_to_crc; ++i) {
+    bool data_bit = get_bit(i);
+    bool crc_msb = (crc >> 23) & 1;
+    crc <<= 1;
+    if (data_bit ^ crc_msb) {
+      crc ^= poly;
+    }
+  }
+
+  return crc & 0xFFFFFF;
+}
+
+bool Panda::unpack_flexray_buffer(uint8_t *data, uint32_t &size, std::vector<can_frame> &out_vec) {
+  int pos = 0;
+  // New variable-length format per USB stream:
+  // [len_lo][len_hi] | [source:1] [header:5] [payload:N] [crc24_be:3]
+  // where len = 1 + 5 + N + 3, and N == payload_length_words * 2
+  while (pos + 2 <= (int)size) {
+    uint16_t body_len = (uint16_t)(data[pos] | (data[pos + 1] << 8));
+    uint32_t record_len = (uint32_t)body_len + 2U; // include length field itself
+
+    // Basic sanity on body_len
+    if (body_len < (uint16_t)(1 + 5 + 3) || body_len > (uint16_t)(1 + 5 + MAX_FRAME_PAYLOAD_BYTES + 3)) {
+      // Invalid length, attempt resync by skipping one byte
+      pos += 1;
+      continue;
+    }
+
+    if (pos + (int)record_len > (int)size) {
+      // Partial record; wait for more data
+      break;
+    }
+
+    const uint8_t *rec = &data[pos + 2];
+    uint8_t source = rec[0];
+    const uint8_t *hdr = &rec[1]; // 5 bytes
+    // Extract header fields
+    uint8_t byte0 = hdr[0];
+    uint8_t byte1 = hdr[1];
+    uint8_t byte2 = hdr[2];
+    uint8_t byte3 = hdr[3];
+    uint8_t byte4 = hdr[4];
+
+    flexray_frame_t frame = {};
+    frame.source = source;
+    frame.indicators = (uint8_t)(byte0 >> 3);
+    frame.frame_id = (uint16_t)(((byte0 & 0x07) << 8) | byte1);
+    frame.payload_length_words = (uint8_t)(byte2 >> 1);
+    frame.header_crc = (uint16_t)(((uint16_t)(byte2 & 0x01) << 10) | ((uint16_t)byte3 << 2) | ((byte4 >> 6) & 0x03));
+    frame.cycle_count = (uint8_t)(byte4 & 0x3F);
+
+    uint16_t expected_payload_bytes = (uint16_t)frame.payload_length_words * 2U;
+    // Compute actual payload bytes from body length
+    uint16_t actual_payload_bytes = (uint16_t)(body_len - (uint16_t)(1 + 5 + 3));
+
+    bool length_ok = (actual_payload_bytes == expected_payload_bytes) && (expected_payload_bytes <= MAX_FRAME_PAYLOAD_BYTES);
+
+    const uint8_t *payload_ptr = &rec[1 + 5];
+    const uint8_t *crc_ptr = &payload_ptr[actual_payload_bytes];
+    uint32_t crc_stream = ((uint32_t)crc_ptr[0] << 16) | ((uint32_t)crc_ptr[1] << 8) | (uint32_t)crc_ptr[2];
+
+    if (!length_ok) {
+      // Skip malformed record
+      pos += 1;
+      continue;
+    }
+
+    if (expected_payload_bytes > 0) {
+      memcpy(frame.payload, payload_ptr, expected_payload_bytes);
+    }
+
+    // Validate header CRC and payload CRC
+    bool header_crc_ok = (calculate_flexray_header_crc(frame) == frame.header_crc);
+    uint32_t payload_crc = calculate_flexray_payload_crc(frame) & 0xFFFFFFu;
+    bool payload_crc_ok = (payload_crc == crc_stream);
+
+    if (header_crc_ok && payload_crc_ok) {
+      can_frame &canData = out_vec.emplace_back();
+      canData.address = frame.frame_id;
+      canData.src = frame.source + bus_offset;
+      size_t payload_len = std::min((size_t)expected_payload_bytes, sizeof(frame.payload));
+      canData.dat.assign(1, frame.cycle_count);
+      canData.dat.append(frame.payload, payload_len);
+    }
+
+    // advance to next record
+    pos += record_len;
+  }
+
+  // move remaining bytes (partial record) to start of buffer for next read
+  memmove(data, &data[pos], size - pos);
+  size -= pos;
+
+  return true;
 }
