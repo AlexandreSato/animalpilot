@@ -3,7 +3,7 @@
   url = https://github.com/sunnyhaibin/panda.git
 [submodule "opendbc"]
   path = opendbc_repo
-	url = git@github.com:dynm/opendbc-sunnypilot.git
+	url = https://github.com/dynm/opendbc-sunnypilot.git
 	branch = pico-flexray
 [submodule "msgq"]
   path = msgq_repo
